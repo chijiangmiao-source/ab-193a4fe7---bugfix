@@ -1,0 +1,41 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    image: lattice-audit-backend:latest
+    container_name: lattice-audit-backend
+    restart: unless-stopped
+    expose:
+      - "8000"
+
+  web:
+    build:
+      context: ./frontend
+    image: lattice-audit-web:latest
+    container_name: lattice-audit-web
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      # Host-side port is configurable: FRONTEND_PORT=9000 docker compose up -d
+      - "${FRONTEND_PORT:-8080}:80"
+
+  # One-shot acceptance service: runs the exact-arithmetic tests plus
+  # end-to-end HTTP checks against both containers, then exits.  Its exit
+  # code is the verdict (0 pass / non-zero fail).
+  verify:
+    image: lattice-audit-backend:latest
+    build:
+      context: ./backend
+    container_name: lattice-audit-verify
+    depends_on:
+      backend:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    environment:
+      BACKEND_URL: http://backend:8000
+      WEB_URL: http://web:80
+    restart: "no"
+    entrypoint: ["python", "scripts/acceptance.py"]
