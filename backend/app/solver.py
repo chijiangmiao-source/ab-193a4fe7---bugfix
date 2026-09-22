@@ -70,6 +70,25 @@ def _gcd(a: int, b: int) -> int:
 def _generated_lattice(pts: List[Vec2]) -> Optional[Mat2]:
     """Column HNF of the Z-span of differences ``p - pts[0]``.
 
+    This is the coarsest lattice (largest cell area) containing every
+    point: its area is the gcd of *all* pairwise 2x2 minors of the
+    difference vectors, so it must be accumulated over every generator --
+    any single pair of vectors only gives an upper bound, never the answer.
+
+    The lattice is built with a streaming column-HNF update: an existing
+    HNF lattice with columns ``c1=(h,r)``, ``c2=(0,q)`` absorbs one more
+    vector ``w=(x,y)`` via a single extended-gcd step.  With
+    ``s*h + t*x == g = gcd(h,x)`` the unimodular change of basis
+
+        c1' = s*c1 + t*w = (g, R),  R = s*r + t*y
+        u   = -(x/g)*c1 + (h/g)*w = (0, d/g),  d = h*y - r*x
+
+    preserves the determinant, and the old vertical column ``(0,q)``
+    together with ``(0,d/g)`` Z-spans ``(0, Q)`` where
+    ``Q = gcd(q, d/g)``.  Reducing ``R`` modulo ``Q`` gives the new HNF
+    ``((g,0),(R mod Q,Q))``.  Because the final lattice is the Z-span and
+    the HNF is unique, the result is independent of generator order.
+
     Returns ``None`` when the points are collinear (rank < 2).
     """
     base = pts[0]
@@ -78,30 +97,27 @@ def _generated_lattice(pts: List[Vec2]) -> Optional[Mat2]:
         v = (p[0] - base[0], p[1] - base[1])
         if v != (0, 0):
             vectors.append(v)
-
-    seed: Optional[Tuple[Vec2, Vec2]] = None
-    seed_area: Optional[int] = None
-    for i, u in enumerate(vectors):
-        for v in vectors[i + 1:]:
-            candidate_area = abs(u[0] * v[1] - u[1] * v[0])
-            if candidate_area != 0 and (
-                seed_area is None or candidate_area < seed_area
-            ):
-                seed = (u, v)
-                seed_area = candidate_area
-    if seed is None:
+    if not vectors:
         return None
 
-    seed_hnf = hnf22(seed)
-    if all(member_coord(seed_hnf, (0, 0), v) is not None for v in vectors):
-        return seed_hnf
+    a, b = vectors[0]
+    H: Optional[Mat2] = None
+    for x, y in vectors[1:]:
+        if a * y - b * x != 0:
+            H = hnf22(((a, b), (x, y)))
+            break
+    if H is None:
+        return None
 
-    horizontal_period = 0
-    vertical_period = 0
+    (h, _), (r, q) = H
+    # Fold in every difference vector (the seed vectors leave H unchanged).
     for x, y in vectors:
-        horizontal_period = _gcd(horizontal_period, x)
-        vertical_period = _gcd(vertical_period, y)
-    return ((horizontal_period, 0), (0, vertical_period))
+        g, s, t = extgcd(h, x)
+        R = s * r + t * y
+        d = h * y - r * x
+        Q = _gcd(q, d // g)  # g | d since g divides both h and x
+        h, r, q = g, R % Q, Q
+    return ((h, 0), (r, q))
 
 
 def _non_collinear(points: List[Vec2]) -> bool:

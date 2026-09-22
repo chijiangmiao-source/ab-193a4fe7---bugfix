@@ -66,6 +66,18 @@ SAMPLE_POINTS = [
 ]
 
 
+def rule_batch_points():
+    """12 spots: O=(7,-4), four A along (10,0), three B along (0,30),
+    four C along (5,25).  Their differences jointly Z-span area 50."""
+    ox, oy = 7, -4
+    pts = [{"id": "O", "x": ox, "y": oy}]
+    pts += [{"id": f"A{k}", "x": ox + 10 * k, "y": oy} for k in range(1, 5)]
+    pts += [{"id": f"B{k}", "x": ox, "y": oy + 30 * k} for k in range(1, 4)]
+    pts += [{"id": f"C{k}", "x": ox + 5 * k, "y": oy + 25 * k}
+            for k in range(1, 5)]
+    return pts
+
+
 def verify_membership(result, points, label):
     """Independently re-derive every point from basis + integer coords."""
     h, r = result["basis"]["b1"]
@@ -137,7 +149,41 @@ def main():
     check(status == 200 and data2["feasible"] and data2["result"]["area"] == 12,
           "proxied audit returns the identical conclusion")
 
-    print("\n== 6. infeasible case: input retained + max-area witness ==")
+    print("\n== 6. multi-difference rule batch -> coarsest area-50 cell ==")
+    batch = rule_batch_points()
+    check(len(batch) == 12, "rule batch has exactly 12 spots")
+    req = {"points": batch, "min_cell_area": 2, "max_outliers": 0}
+    status, data = http_post(f"{BACKEND_URL}/api/audit", req)
+    check(status == 200, "rule batch HTTP 200")
+    check(data["feasible"] is True, "rule batch is feasible")
+    rb = data["result"]
+    check(rb["area"] == 50, f"multi-difference cell area is 50 (got {rb['area']})")
+    check(rb["hnf"] == {"h": 5, "r": 5, "q": 10},
+          f"canonical HNF h=5,r=5,q=10 (got {rb['hnf']})")
+    check(rb["origin"] == [2, 1], f"canonical coset origin [2,1] (got {rb['origin']})")
+    check(rb["outlier_count"] == 0 and rb["outliers"] == [],
+          f"zero outliers, all 12 kept (got {rb['outlier_count']})")
+    check(rb["retained_count"] == 12, "all 12 spots retained")
+    verify_membership(rb, batch, "rule-batch")
+
+    # Same batch with the spots in a different order: identical conclusion
+    # and identical per-point integer coordinates.
+    reordered = list(reversed(batch[5:] + batch[:5]))
+    base_coords = {it["id"]: it["coord"] for it in rb["retained"]}
+    status, data2 = http_post(
+        f"{WEB_URL}/api/audit",
+        {"points": reordered, "min_cell_area": 2, "max_outliers": 0},
+    )
+    check(status == 200 and data2["feasible"], "reordered batch feasible via proxy")
+    rb2 = data2["result"]
+    check((rb2["area"], rb2["hnf"], rb2["origin"], rb2["outliers"])
+          == (50, {"h": 5, "r": 5, "q": 10}, [2, 1], []),
+          "reorder gives identical area/HNF/origin/outlier partition")
+    check({it["id"]: it["coord"] for it in rb2["retained"]} == base_coords,
+          "reorder gives identical per-point integer coordinates")
+    verify_membership(rb2, reordered, "rule-batch-reordered")
+
+    print("\n== 7. infeasible case: input retained + max-area witness ==")
     tight = [
         {"id": f"p{i}", "x": i - 4, "y": 2 * ((i - 4) % 2)} for i in range(10)
     ]
@@ -151,7 +197,7 @@ def main():
     check(len(data["input"]["points"]) == 10, "the full input is echoed back")
     verify_membership(data["witness"], tight, "witness")
 
-    print("\n== 7. contract validation ==")
+    print("\n== 8. contract validation ==")
     bad_payloads = [
         ({"points": SAMPLE_POINTS[:5], "min_cell_area": 2, "max_outliers": 0},
          "fewer than 6 points rejected"),
@@ -166,7 +212,7 @@ def main():
         status, _ = http_post(f"{BACKEND_URL}/api/audit", payload)
         check(status == 422, label)
 
-    print("\n== 8. exactness with 10^18-scale coordinates ==")
+    print("\n== 9. exactness with 10^18-scale coordinates ==")
     B = 10**18
     # 8 points on the area B^2 lattice (B,0),(0,B).
     big = [{"id": f"p{i}", "x": B * m, "y": B * n}

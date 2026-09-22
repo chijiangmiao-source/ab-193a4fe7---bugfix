@@ -12,7 +12,7 @@ backend/            FastAPI 服务（精确整数求解器）
   app/lattice.py    HNF / 扩展欧几里得 / 余类原点 / 逐点整数坐标（纯整数）
   app/solver.py     枚举删除 0..K 个点的生成格，按裁决次序求最优
   app/main.py       /health 与 POST /api/audit
-  tests/            13 个纯标准库测试（含对拍独立全枚举的最优性验证）
+  tests/            16 个纯标准库测试（含独立通用 HNF 对拍与最优性全枚举验证）
   scripts/acceptance.py  compose verify 一次性验收脚本
 frontend/           React + Vite 单页应用（SVG 晶格叠加）
   src/LatticeOverlay.jsx 用返回的整数基/原点重建网格、保留点、离群点
@@ -47,9 +47,11 @@ docker compose up --build verify
 docker inspect -f '{{.State.ExitCode}}' lattice-audit-verify
 ```
 
-验收内容：13 个精确整数单元测试 → 后端 HTTP 健康 → nginx 静态页与反代 →
-污染网格场景（面积 12、恰 3 个离群点 b0/b1/b2）→ 代理同请求结论一致 →
-不可行时的最大面积见证可复算 → 输入契约 422 → 10^18 坐标精确性。
+验收内容：16 个精确整数单元测试 → 后端 HTTP 健康 → nginx 静态页与反代 →
+污染网格场景（面积 12、恰 3 个离群点 b0/b1/b2）→ 多差向量规则批次
+（面积 50、HNF h=5/r=5/q=10、规范原点 (2,1)、零离群）及其重排 →
+代理同请求结论一致 → 不可行时的最大面积见证可复算 → 输入契约 422 →
+10^18 坐标精确性。
 
 ## 接口
 

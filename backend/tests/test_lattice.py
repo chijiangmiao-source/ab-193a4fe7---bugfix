@@ -171,6 +171,181 @@ def test_dense_grid_with_outliers():
     _verify_result(payload, r)
 
 
+def _rule_batch_points():
+    """The 12-spot rule-generated batch: O plus four A, three B, four C."""
+    O = (7, -4)
+    pts = [("O", O[0], O[1])]
+    for k in range(1, 5):
+        pts.append((f"A{k}", O[0] + 10 * k, O[1]))
+    for k in range(1, 4):
+        pts.append((f"B{k}", O[0], O[1] + 30 * k))
+    for k in range(1, 5):
+        pts.append((f"C{k}", O[0] + 5 * k, O[1] + 25 * k))
+    return pts
+
+
+def test_multi_difference_generated_lattice():
+    # Several difference families together generate a finer lattice than any
+    # single pair: (10,0),(0,30),(5,25) Z-span the area-50 lattice, not the
+    # area-25 axis mesh (gcd(10*30, 10*25, 0*25-30*5) == gcd(300,250,150)==50).
+    from app.solver import _generated_lattice
+
+    H = _generated_lattice(
+        [(0, 0), (10, 0), (0, 30), (5, 25)]
+    )
+    check(H == ((5, 0), (5, 10)), f"raw vectors HNF {H}")
+    check(H[0][0] * H[1][1] == 50, "multi-difference area is 50")
+    # Ordering of the difference vectors must not change the answer.
+    H2 = _generated_lattice([(0, 0), (5, 25), (0, 30), (10, 0), (20, 0)])
+    check(H2 == H, f"reordered input changed HNF: {H2}")
+
+    pts = _rule_batch_points()
+    H3 = _generated_lattice([(x, y) for _, x, y in pts])
+    check(H3 == ((5, 0), (5, 10)), f"batch HNF {H3}")
+
+    payload = {
+        "points": [{"id": i, "x": x, "y": y} for i, x, y in pts],
+        "min_cell_area": 2,
+        "max_outliers": 0,
+    }
+    out = solve(payload)
+    check(out["feasible"], f"batch must be feasible: {out.get('reason')}")
+    r = out["result"]
+    check(r["area"] == 50, f"coarsest area {r['area']} != 50")
+    check(r["hnf"] == {"h": 5, "r": 5, "q": 10}, str(r["hnf"]))
+    check(r["origin"] == [2, 1], f"canonical origin {r['origin']} != [2,1]")
+    check(r["outlier_count"] == 0, f"zero outliers, got {r['outlier_count']}")
+    check(r["outliers"] == [], "no outlier ids")
+    check(len(r["retained"]) == 12, "all 12 spots retained")
+    _verify_result(payload, r)
+
+
+def test_rule_batch_invariant_under_reorder():
+    # Reordering the spot input must not change area, HNF, canonical origin,
+    # outlier partition or any point's integer coordinates.
+    pts = _rule_batch_points()
+    payload = {
+        "points": [{"id": i, "x": x, "y": y} for i, x, y in pts],
+        "min_cell_area": 2,
+        "max_outliers": 0,
+    }
+    base = solve(payload)["result"]
+    base_coords = {
+        item["id"]: tuple(item["coord"]) for item in base["retained"]
+    }
+    signature = (base["area"], base["hnf"], tuple(base["origin"]),
+                 tuple(base["outliers"]))
+
+    orders = [list(reversed(pts)),
+              sorted(pts, key=lambda p: p[0]),
+              sorted(pts, key=lambda p: (p[2], p[1]))]
+    rng = random.Random(1234)
+    for _ in range(8):
+        shuffled = pts[:]
+        rng.shuffle(shuffled)
+        orders.append(shuffled)
+    for order in orders:
+        p2 = {
+            "points": [{"id": i, "x": x, "y": y} for i, x, y in order],
+            "min_cell_area": 2,
+            "max_outliers": 0,
+        }
+        out = solve(p2)
+        check(out["feasible"], f"reorder feasible: {out.get('reason')}")
+        r = out["result"]
+        sig = (r["area"], r["hnf"], tuple(r["origin"]), tuple(r["outliers"]))
+        check(sig == signature, f"reorder changed conclusion: {sig}")
+        coords = {item["id"]: tuple(item["coord"]) for item in r["retained"]}
+        check(coords == base_coords, "reorder changed per-point coords")
+        _verify_result(p2, r)
+
+
+def _reference_generated_hnf(vecs):
+    """Independent oracle: generic column HNF of a 2xn integer matrix.
+
+    Built from Euclidean column operations only -- shares no code with the
+    solver's incremental construction, so agreement means the solver really
+    finds the Z-span, not merely a lattice consistent by membership.
+    """
+    from math import gcd as _gcd
+
+    cols = [[x, y] for x, y in vecs if (x, y) != (0, 0)]
+    while True:
+        nz = [i for i, c in enumerate(cols) if c[0] != 0]
+        if len(nz) <= 1:
+            break
+        i, j = nz[0], nz[1]
+        a, b = cols[i][0], cols[j][0]
+        if abs(a) < abs(b):
+            i, j, a, b = j, i, b, a
+        q = a // b if b else 0
+        cols[i][0] -= q * cols[j][0]
+        cols[i][1] -= q * cols[j][1]
+    nz = [i for i, c in enumerate(cols) if c[0] != 0]
+    if not nz:
+        return None
+    i0 = nz[0]
+    if cols[i0][0] < 0:
+        cols[i0][0], cols[i0][1] = -cols[i0][0], -cols[i0][1]
+    h = cols[i0][0]
+    q = 0
+    for k, c in enumerate(cols):
+        if k != i0:
+            q = _gcd(q, abs(c[1]))
+    if q == 0:
+        return None
+    return ((h, 0), (cols[i0][1] % q, q))
+
+
+def test_generated_lattice_matches_independent_hnf():
+    from itertools import combinations
+    from math import gcd as _gcd
+
+    from app.solver import _generated_lattice
+
+    rng = random.Random(777)
+    checked = 0
+    for _ in range(400):
+        vecs = []
+        if rng.random() < 0.5:
+            # hidden coarse lattice, samples with coefficient gaps
+            while True:
+                u = (rng.randint(-6, 6), rng.randint(-6, 6))
+                v = (rng.randint(-6, 6), rng.randint(-6, 6))
+                if u[0] * v[1] - u[1] * v[0] != 0:
+                    break
+            for _ in range(rng.randint(2, 7)):
+                a, b = rng.randint(0, 4), rng.randint(0, 4)
+                vecs.append((a * u[0] + b * v[0], a * u[1] + b * v[1]))
+        else:
+            # axis families + diagonals: the multi-difference failure shape
+            hx, vy = rng.choice([2, 5, 10]), rng.choice([6, 15, 30])
+            vecs = [(hx * rng.randint(1, 3), 0), (0, vy * rng.randint(1, 3))]
+            for _ in range(rng.randint(0, 3)):
+                vecs.append((hx * rng.randint(0, 3),
+                             hx * rng.randint(0, 3) + vy * rng.randint(0, 3)))
+        if all((x, y) == (0, 0) for x, y in vecs):
+            continue
+        if rng.random() < 0.1:  # big integers every so often
+            B = 10 ** rng.randint(2, 12)
+            vecs = [(x * B, y * B) for x, y in vecs]
+        ref = _reference_generated_hnf(vecs)
+        perm = vecs[:]
+        rng.shuffle(perm)
+        got = _generated_lattice([(0, 0)] + perm)
+        if ref is None:
+            check(got is None, "rank-deficient case")
+            continue
+        check(got == ref, f"HNF {got} != independent {ref} for {vecs}")
+        # Area independently equals gcd of every pairwise 2x2 minor.
+        gminor = 0
+        for a, b in combinations(vecs, 2):
+            gminor = _gcd(gminor, abs(a[0] * b[1] - a[1] * b[0]))
+        check(got[0][0] * got[1][1] == gminor, "minor-gcd area invariant")
+        checked += 1
+    check(checked >= 300, f"not enough rank-2 trials: {checked}")
+
+
 def test_area_infeasible_reports_witness():
     # Collinear-ish thin cluster: only small-area lattices attainable.
     b1, b2 = (1, 0), (0, 2)  # area 2
