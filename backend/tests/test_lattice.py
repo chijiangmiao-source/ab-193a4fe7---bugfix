@@ -9,9 +9,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.lattice import (  # noqa: E402
     canonical_origin,
     extgcd,
+    generated_hnf,
     hnf22,
     lattice_key,
     member_coord,
+    merge_hnf,
 )
 from app.solver import ValidationError, solve, validate  # noqa: E402
 
@@ -77,6 +79,157 @@ def test_hnf_uniqueness():
     H2 = hnf22(((u[0] + v[0], u[1] + v[1]), v))
     H3 = hnf22(((-v[0], -v[1]), (u[0] + 2 * v[0], u[1] + 2 * v[1])))
     check(H1 == H2 == H3, f"HNF not unique: {H1} {H2} {H3}")
+
+
+def _rule_batch_points():
+    """The audited rule-generated batch: O=(7,-4), four A spots at
+    O+k*(10,0), three B spots at O+k*(0,30), four C spots at
+    O+k*(5,25)."""
+    O = (7, -4)
+    pts = [("O", O[0], O[1])]
+    pts += [(f"A{k}", O[0] + 10 * k, O[1]) for k in range(1, 5)]
+    pts += [(f"B{k}", O[0], O[1] + 30 * k) for k in range(1, 4)]
+    pts += [(f"C{k}", O[0] + 5 * k, O[1] + 25 * k) for k in range(1, 5)]
+    return pts
+
+
+def test_generated_hnf_multi_vector():
+    # generated_hnf over many vectors: covolume must equal the gcd of all
+    # pairwise 2x2 minors (Cauchy--Binet), every generator must be a member,
+    # and the result must be independent of vector order.  This is the exact
+    # invariant the old single-seed + diagonal fallback violated.
+    from math import gcd as math_gcd
+
+    rng = random.Random(2024)
+    for trial in range(400):
+        nvec = rng.randint(3, 10)
+        vecs = [
+            (rng.randint(-40, 40), rng.randint(-40, 40)) for _ in range(nvec)
+        ]
+        # Ensure rank 2.
+        vecs.append((rng.choice((1, -1)) * 6, 0))
+        vecs.append((rng.randint(0, 3), 7))
+        D = 0
+        for i in range(len(vecs)):
+            for j in range(i + 1, len(vecs)):
+                D = math_gcd(
+                    D, abs(vecs[i][0] * vecs[j][1] - vecs[i][1] * vecs[j][0])
+                )
+        H = generated_hnf(vecs)
+        check(H is not None, "rank-2 set must generate a lattice")
+        (h, _), (r, q) = H
+        check(h * q == D, f"covolume {h*q} != minors gcd {D}")
+        check(h > 0 and q > 0 and 0 <= r < q, "HNF bounds")
+        for w in vecs:
+            check(member_coord(H, (0, 0), w) is not None,
+                  f"generator {w} missing from its own lattice")
+        # Order independence: shuffles and reversed input must agree.
+        shuffled = vecs[:]
+        rng.shuffle(shuffled)
+        check(generated_hnf(shuffled) == H, "generated HNF depends on order")
+        check(generated_hnf(list(reversed(vecs))) == H,
+              "generated HNF depends on order (reversed)")
+        # Duplicated generators must not change the span.
+        check(generated_hnf(vecs + vecs[:2]) == H,
+              "duplicate generators changed the span")
+        # Merging a vector already in the lattice is a no-op.
+        w = vecs[0]
+        mc = member_coord(H, (0, 0), w)
+        check(mc is not None and merge_hnf(H, w) == H,
+              "merge of a lattice vector must be the identity")
+        # Zero vectors are ignored.
+        check(generated_hnf([(0, 0)] + vecs + [(0, 0)]) == H,
+              "zero vectors must be ignored")
+        # All-collinear input has rank < 2.
+        check(generated_hnf([(2, 4), (-3, -6), (0, 0)]) is None,
+              "collinear vectors must yield None")
+
+
+def test_generated_hnf_reported_vectors():
+    # Difference vectors of the reported batch generate an area-50 lattice
+    # with column HNF h=5, r=5, q=10 -- never the old area-25 diagonal mesh.
+    O = (7, -4)
+    vecs = [(10 * k, 0) for k in range(1, 5)]
+    vecs += [(0, 30 * k) for k in range(1, 4)]
+    vecs += [(5 * k, 25 * k) for k in range(1, 5)]
+    H = generated_hnf(vecs)
+    check(H == ((5, 0), (5, 10)), f"unexpected HNF {H}")
+    check(H[0][0] * H[1][1] == 50, "area must be 50")
+    for w in vecs:
+        check(member_coord(H, (0, 0), w) is not None, f"{w} not on lattice")
+    # The old over-dense answer genuinely contained every generator: mere
+    # membership could not expose the area loss, so assert the coarseness
+    # with a point on the area-25 diagonal mesh that is not on the true one.
+    fine = ((5, 0), (0, 5))
+    check(member_coord(fine, (0, 0), (0, 5)) is not None, "fine mesh sanity")
+    check(member_coord(H, (0, 0), (0, 5)) is None,
+          "the true lattice is strictly coarser than the fine mesh")
+
+
+def test_multi_difference_lattice_area50():
+    # The full reported audit batch: area 50, HNF (h=5,r=5,q=10), canonical
+    # origin (2,1), all 12 spots retained, zero outliers.
+    pts = _rule_batch_points()
+    check(len(pts) == 12, "batch must contain 12 spots")
+    payload = {
+        "points": [{"id": pid, "x": x, "y": y} for pid, x, y in pts],
+        "min_cell_area": 2,
+        "max_outliers": 0,
+    }
+    out = solve(payload)
+    check(out["feasible"], f"must be feasible: {out.get('reason')}")
+    r = out["result"]
+    check(r["area"] == 50, f"area {r['area']} != 50")
+    check(r["hnf"] == {"h": 5, "r": 5, "q": 10}, str(r["hnf"]))
+    check(r["basis"] == {"b1": [5, 5], "b2": [0, 10]}, str(r["basis"]))
+    check(r["origin"] == [2, 1], f"origin {r['origin']} != [2,1]")
+    check(r["outlier_count"] == 0, f"outliers {r['outlier_count']}")
+    check(r["outliers"] == [], "no outlier ids")
+    check(r["retained_count"] == 12, "all 12 spots retained")
+    check({p["id"] for p in r["retained"]} == {pid for pid, _, _ in pts},
+          "retained id set mismatch")
+    _verify_result(payload, r)
+    _verify_optimality(payload, r)
+
+
+def test_multi_difference_lattice_order_independence():
+    # Reordering spot entry (and therefore difference enumeration) must not
+    # change area, HNF, canonical origin or the zero-outlier partition.
+    pts = _rule_batch_points()
+    rng = random.Random(99)
+    orders = [
+        list(reversed(pts)),
+        sorted(pts, key=lambda t: t[0]),
+    ]
+    for _ in range(10):
+        order = pts[:]
+        rng.shuffle(order)
+        orders.append(order)
+    reference = None
+    for order in orders:
+        payload = {
+            "points": [{"id": pid, "x": x, "y": y} for pid, x, y in order],
+            "min_cell_area": 2,
+            "max_outliers": 0,
+        }
+        out = solve(payload)
+        check(out["feasible"], f"permuted batch feasible: {out.get('reason')}")
+        r = out["result"]
+        signature = (
+            r["area"],
+            (r["hnf"]["h"], r["hnf"]["r"], r["hnf"]["q"]),
+            tuple(r["origin"]),
+            r["outlier_count"],
+            tuple(sorted((p["id"], tuple(p["coord"])) for p in r["retained"])),
+        )
+        if reference is None:
+            reference = signature
+        check(signature == reference,
+              f"conclusion changed under reorder: {signature} != {reference}")
+        check(signature[0] == 50 and signature[1] == (5, 5, 10)
+              and signature[2] == (2, 1) and signature[3] == 0,
+              "permuted batch keeps area 50 / HNF (5,5,10) / origin (2,1)")
+        _verify_result(payload, r)
 
 
 def _lattice_points(origin, b1, b2, mr, nr, used, rng, skip=()):

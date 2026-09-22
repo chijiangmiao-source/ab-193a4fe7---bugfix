@@ -45,8 +45,7 @@ from .lattice import (
     Mat2,
     Vec2,
     canonical_origin,
-    extgcd,
-    hnf22,
+    generated_hnf,
     lattice_key,
     member_coord,
 )
@@ -62,15 +61,14 @@ class ValidationError(ValueError):
     """Raised for request payloads that violate the input contract."""
 
 
-def _gcd(a: int, b: int) -> int:
-    g, _, _ = extgcd(a, b)
-    return g
-
-
 def _generated_lattice(pts: List[Vec2]) -> Optional[Mat2]:
     """Column HNF of the Z-span of differences ``p - pts[0]``.
 
-    Returns ``None`` when the points are collinear (rank < 2).
+    Returns ``None`` when the points are collinear (rank < 2).  The span is
+    built incrementally with exact HNF generator merges
+    (``lattice.generated_hnf``), so the covolume is the gcd of *all*
+    pairwise 2x2 minors (Cauchy--Binet); a single pair of vectors only
+    fixes a multiple of the true area and must never be mistaken for it.
     """
     base = pts[0]
     vectors: List[Vec2] = []
@@ -78,30 +76,7 @@ def _generated_lattice(pts: List[Vec2]) -> Optional[Mat2]:
         v = (p[0] - base[0], p[1] - base[1])
         if v != (0, 0):
             vectors.append(v)
-
-    seed: Optional[Tuple[Vec2, Vec2]] = None
-    seed_area: Optional[int] = None
-    for i, u in enumerate(vectors):
-        for v in vectors[i + 1:]:
-            candidate_area = abs(u[0] * v[1] - u[1] * v[0])
-            if candidate_area != 0 and (
-                seed_area is None or candidate_area < seed_area
-            ):
-                seed = (u, v)
-                seed_area = candidate_area
-    if seed is None:
-        return None
-
-    seed_hnf = hnf22(seed)
-    if all(member_coord(seed_hnf, (0, 0), v) is not None for v in vectors):
-        return seed_hnf
-
-    horizontal_period = 0
-    vertical_period = 0
-    for x, y in vectors:
-        horizontal_period = _gcd(horizontal_period, x)
-        vertical_period = _gcd(vertical_period, y)
-    return ((horizontal_period, 0), (0, vertical_period))
+    return generated_hnf(vectors)
 
 
 def _non_collinear(points: List[Vec2]) -> bool:
